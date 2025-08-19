@@ -1,5 +1,6 @@
 # card_utils.py
 from typing import Dict, Any, List
+import hashlib
 import random
 
 RANK_TO_VALUE = {

@@ -1,7 +1,5 @@
 import ast, re
 
-_RANK_TOKEN_RE = re.compile(r'(?<![A-Za-z0-9_.])([AaJjQqKk])(?![A-Za-z0-9_.])')
-_RANK_TOKEN_MAP = {"A":"1","J":"11","Q":"12","K":"13"}
 
 # add 'T' to the map and regex (T for Ten)
 _RANK_TOKEN_RE = re.compile(r'(?<![A-Za-z0-9_.])([AaJjQqKkTt])(?![A-Za-z0-9_.])')
