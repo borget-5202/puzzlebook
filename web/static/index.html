@@ -33,8 +33,25 @@
                   <option value="easy">easy</option>
                   <option value="medium">medium</option>
                   <option value="hard">hard</option>
+                  <option value="challenge">Challenge</option>
                 </select>
               </label>
+            </div>
+	    <!-- ADD THIS NEW ROW -->
+            <div class="settings-row">
+                <label>
+                    <input type="checkbox" id="autoDeal">
+                    Auto-Deal (Continuous Play)
+                </label>
+            </div>
+	    <div class="settings-row">
+              <label>Jump to Case ID:
+		  <input type="number" id="caseIdInput" placeholder="e.g., 1259"
+                    min="1" max="1820"
+                    title="Enter a number between 1 and 1820"
+                    style="width: 80px;">
+              </label>
+              <button id="loadCaseBtn" class="info-btn">Go</button>
             </div>
           </details>
           <span class="link" id="howtoLink" title="How to play">?</span>
@@ -64,7 +81,8 @@
         <!-- Answer panel moved up -->
         <div class="answer-container">
           <input id="answer" class="answer-box" type="text"
-                 placeholder="Example: (A+Q)*(T-1)  —  T=10, ^=power" />
+                 placeholder="Example: (A+Q)*(T-1)  —  T=10, ^=power" 
+		 autocomplete="off" />
           <div id="answerFeedback" class="answer-feedback"></div>
         </div>
 
@@ -123,6 +141,10 @@
         <li>Use each of the 4 numbers exactly once to make <b>24</b>.</li>
         <li>Allowed: <b>+</b> <b>−</b> <b>*</b> <b>/</b> <b>^</b> (power) and parentheses.</li>
         <li>Ranks: <b>A=1</b>, <b>J=11</b>, <b>Q=12</b>, <b>K=13</b>, <b>T=10</b>.</li>
+        <li><b>Theme</b> (in Settings): Changes the visual style of the playing cards. Choose from <b>Classic</b>, <b>Kids</b>, and <b>Seniors</b> for a different look and feel!</li>
+        <li><b>Difficulty</b> (in Settings): Adjust the challenge. <b>Easy</b> puzzles have simpler solutions, <b>Hard</b> puzzles will test your skills, and <b>Medium</b> offers a balanced mix. <b>Challenge</b>: Confront <b>impossible sets</b>. Your goal is not to solve, but to correctly identify puzzles that have no solution—a true test of logical deduction.</li>
+        <li><b>Auto-Deal</b> (in Settings): When enabled, a new puzzle is presented automatically after you solve or skip one. Enabled by default for continuous play!</li>
+	<li><b>Precision Selection</b>: Enter any <b>Case ID</b> (1-1820) in the settings to load a specific puzzle instantly. Ideal for educators to assign problems or for mastering a particular challenge.</li>
         <li>Shortcuts: <b>Enter=Check</b>, <b>D=Deal</b>, <b>N=No solution</b>, <b>H=Help</b>, <b>Shift+H=Help all</b>, <b>S=Skip</b>, <b>R=Restart</b>, <b>X=Exit</b>.</li>
       </ul>
     </div>
