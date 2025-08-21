@@ -9,6 +9,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const stats = { played:0, solved:0, revealed:0, skipped:0, totalTime:0 };
   let currentStatus='idle';
   let revealedThisQuestion=false;
+  let autoDealEnabled = false;
 
   // Timer
   let tStart=0, tTick=null;
@@ -77,12 +78,44 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   function clearAnswer(){ el.answer.value=''; el.answer.focus(); }
 
+  // NEW FUNCTION: Handles the UI update after any successful puzzle fetch
+  function handleNewPuzzleData(data) {
+    currentSeq = data.seq;
+    current = data;
+    stats.played++;
+    updateStats();
+    el.question.textContent = `Q${data.seq} [#${data.case_id}] — Cards: ${data.question}`;
+  
+    // Clear old cards and render new ones
+    el.cards.innerHTML = '';
+    data.images.forEach(c => {
+      const img = document.createElement('img');
+      img.src = c.url;
+      img.alt = c.code;
+      img.className = 'card';
+      const rankToken = c.code.startsWith('10') ? 'T' : c.code[0];
+      img.title = `Click to insert ${rankToken}`;
+      img.addEventListener('click', () => insertAtCursor(rankToken));
+      el.cards.appendChild(img);
+    });
+  
+    el.answer.value = '';
+    el.answer.focus();
+    timerStart();
+  }
+
+
+  function showError(message) {
+    el.msg.textContent = message;
+    el.msg.className = 'status status-error'; // Start blinking
+    setTimeout(() => {
+        el.msg.classList.remove('status-error');
+        el.msg.className = 'status status-error'; // Keep it red, stop blinking
+    }, 1500);
+  }
+
   // Deal
-  async function deal(){
-    if (currentSeq === undefined || currentSeq === null) {
-        console.log("Initializing currentSeq to 0");
-        currentSeq = 0;
-    }
+  async function deal() {
     if (current && currentStatus === 'pending') {
       stats.skipped++;
       updateStats();
@@ -93,44 +126,69 @@ document.addEventListener('DOMContentLoaded', () => {
     el.question.textContent = 'Dealing…';
     revealedThisQuestion = false;
     currentStatus = 'pending';
-
+  
     try {
-     // Send the currentSeq to the backend!     
-    const r = await fetch(`/api/next?theme=${encodeURIComponent(el.theme.value)}&level=${encodeURIComponent(el.level.value)}&seq=${currentSeq}`);
-      if (!r.ok) {
-        throw new Error('fetch');                                                                                                       }
+      const r = await fetch(`/api/next?theme=${encodeURIComponent(el.theme.value)}&level=${encodeURIComponent(el.level.value)}&seq=${currentSeq}`);
+      if (!r.ok) throw new Error('fetch');
       const data = await r.json();
-                                                                                                                                        // Update the frontend's sequence number with the one from the backend's response
-      currentSeq = data.seq; // <-- This is the other most important line
-
-      if (data.exhausted) {
-        el.question.textContent = data.message || 'No more puzzles at this difficulty.';
-        current = null;
-        currentStatus = 'idle';
-        return;
-      }
-                                                                                                                                        current = data;                                                                                                                   stats.played++;
-      updateStats();
-      el.question.textContent = `Q${data.seq} — Cards: ${data.question}`;  
-
-      // four cards
-      data.images.forEach(c=>{
-        const img=document.createElement('img'); 
-        img.src=c.url; 
-        img.alt=c.code;
-        img.className = 'card';
-        const rankToken = c.code.startsWith('10') ? 'T' : c.code[0];
-        img.title = `Click to insert ${rankToken}`;
-        img.addEventListener('click', ()=> insertAtCursor(rankToken));
-        el.cards.appendChild(img);
-      });
-
-      el.answer.value=''; el.answer.focus(); timerStart();
-    }catch(e){
-      el.question.textContent='No new questions. Try another difficulty level again.';
-      currentStatus='idle';
+      // USE THE HELPER FUNCTION HERE
+      handleNewPuzzleData(data);
+    } catch (e) {
+      console.error("Deal error:", e);
+      el.question.textContent = 'Failed to get a new question.';
+      currentStatus = 'idle';
     }
   }
+
+  async function loadCaseById() {
+    const caseIdInput = $('#caseIdInput').value;
+    const caseId = parseInt(caseIdInput);
+
+    // 1. Check if input is empty or not a number
+    if (!caseIdInput || isNaN(caseId)) {
+        el.msg.textContent = 'Please enter a valid number for the Case ID.';
+        el.msg.className = 'status status-error'; // Make the message red
+        return; // Stop the function here
+    }
+
+    // 2. Check if the number is within the valid range (1 to 1820)
+    if (caseId < 1 || caseId > 1820) {
+        showError('Please enter a Case ID between 1 and 1820.');
+        return;
+    }
+
+    // 3. If we passed the checks, clear any old errors and try to load
+    el.msg.textContent = ''; // Clear previous error messages
+    clearPanels();
+    el.cards.innerHTML = '';
+    el.question.textContent = `Loading Case #${caseId}…`;
+    currentStatus = 'pending';
+
+    try {
+        const r = await fetch(`/api/next?theme=${el.theme.value}&case_id=${caseId}`);
+        if (!r.ok) {
+            // This will catch 404 errors from the backend (e.g., ID 999999)
+            const errorData = await r.json();
+            throw new Error(errorData.error || 'Case not found.');
+        }
+        const data = await r.json();
+        handleNewPuzzleData(data);
+    } catch (e) {
+        console.error("Load case error:", e);
+        el.msg.textContent = `Error: ${e.message}`; // Show the backend's error message
+        el.msg.className = 'status status-error';
+        currentStatus = 'idle';
+    }
+  }
+  // Add event listener for the "Enter" key in the Case ID input box
+  $('#caseIdInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+        e.preventDefault(); // Prevent any default form submission behavior
+        loadCaseById(); // Trigger the same function as the "Go" button
+    }
+  });
+  // Add an event listener for the new button
+  $('#loadCaseBtn').addEventListener('click', loadCaseById);
 
   // Check
   async function check(){
@@ -148,6 +206,10 @@ document.addEventListener('DOMContentLoaded', () => {
 	el.msg.classList.remove('status-error');
 	el.msg.classList.add('status-success'); 
         stats.solved++; currentStatus='solved'; timerStop(); addToTotalTime(); updateStats();
+	if (autoDealEnabled) {
+            // Use a short delay for a better user experience
+            setTimeout(deal, 1500); // Deal a new card after 1.5 seconds
+        }
       } else {
         el.feedback.textContent='✗'; 
 	el.feedback.className='answer-feedback error-icon';
@@ -255,6 +317,24 @@ document.addEventListener('DOMContentLoaded', () => {
   const lSaved=localStorage.getItem('level'); if(lSaved) $('#level').value=lSaved;
   $('#theme').addEventListener('change', ()=>localStorage.setItem('theme',$('#theme').value));
   $('#level').addEventListener('change', ()=>localStorage.setItem('level',$('#level').value));
+
+  const autoDealSaved = localStorage.getItem('autoDeal');
+  if (autoDealSaved) {
+    $('#autoDeal').checked = (autoDealSaved === 'true');
+    autoDealEnabled = ($('#autoDeal').checked);
+  } else {
+    $('#autoDeal').checked = true;
+    autoDealEnabled = true;
+    localStorage.setItem('autoDeal', 'true');
+  }
+  $('#autoDeal').addEventListener('change', () => {
+      localStorage.setItem('autoDeal', $('#autoDeal').checked);
+      autoDealEnabled = $('#autoDeal').checked; // Update the state variable
+      // Optional: If toggled ON while the game is idle, immediately deal a new card
+      if (autoDealEnabled && currentStatus === 'idle') {
+          deal();
+      }
+  });
 
   // Modal
   const showModal=()=>{$('#modalBackdrop').style.display='flex';};
