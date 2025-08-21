@@ -73,7 +73,8 @@ def get_session_state(session_id, expected_seq=None):
                 'difficulty': {
                     'easy': {'played': 0, 'solved': 0},
                     'medium': {'played': 0, 'solved': 0},
-                    'hard': {'played': 0, 'solved': 0}
+                    'hard': {'played': 0, 'solved': 0},
+                    'challenge': {'played': 0, 'solved': 0}
                 }
             }
         }
@@ -97,6 +98,14 @@ def get_session_state(session_id, expected_seq=None):
 
     return SESSION_STORE[session_id]
 
+# Helper function to find a puzzle by case_id
+def find_puzzle_by_case_id(case_id):
+    """Search all puzzles for a specific case_id. Returns the puzzle dict or None."""
+    for puzzle in PUZZLES:
+        if puzzle.get('case_id') == case_id:
+            return puzzle
+    return None  # Not found
+
 @app.route('/api/next')
 def api_next():
     # Get session ID and the expected sequence number from the frontend
@@ -114,15 +123,29 @@ def api_next():
     # Update stats and pick a new question
     theme = request.args.get('theme', 'classic')
     level = request.args.get('level', 'easy')
+    requested_case_id = request.args.get('case_id', type=int)
 
-    # FIX: These lines were causing errors because 'level' was not defined in the function scope.
-    # They are now using the 'level' variable from the request args above.
     state['stats']['played'] += 1
     state['stats']['difficulty'][level]['played'] += 1 # This line now works
 
-    p = state['picker'].pick(level)
-    if not p:
-        return jsonify({"error": "No puzzles available"}), 404
+    #new
+    if requested_case_id is not None:
+        # Try to find the specific puzzle by ID
+        p = find_puzzle_by_case_id(requested_case_id)
+        if p is None:
+            # If not found, decrement the counters we just added and return an error
+            state['seq'] -= 1
+            state['stats']['played'] -= 1
+            return jsonify({"error": f"Case ID {requested_case_id} not found."}), 404
+        print(f"DEBUG: Loading specific case_id: {requested_case_id}")
+    else:
+        # Otherwise, get a random puzzle the normal way
+        p = state['picker'].pick(level)
+        if not p:
+            # If no puzzles available, decrement the counters and return an error
+            state['seq'] -= 1
+            state['stats']['played'] -= 1
+            return jsonify({"error": "No puzzles available"}), 404
 
     state['current'] = p
 
@@ -217,7 +240,7 @@ def api_check():
         state['stats']['difficulty'][state['current'].get('level', 'easy')]['solved'] += 1
         return jsonify({"ok": True, "value": val, "kind": "formula"})
     else:
-        return jsonify({"ok": False, "value": val, "reason": f"Not 24 (got {val})."})
+        return jsonify({"ok": False, "value": val, "reason": f"Not 24 "})
 
 @app.route('/api/help', methods=['POST'])
 def api_help():
@@ -269,7 +292,8 @@ def api_restart():
                 'difficulty': {
                     'easy': {'played': 0, 'solved': 0},
                     'medium': {'played': 0, 'solved': 0},
-                    'hard': {'played': 0, 'solved': 0}
+                    'hard': {'played': 0, 'solved': 0},
+                    'challenge': {'played': 0, 'solved': 0}
                 }
             }
         }
