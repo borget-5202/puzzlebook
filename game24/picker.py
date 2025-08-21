@@ -91,7 +91,13 @@ class QuestionPicker:
                 #if unique_vals:
                 hard_pool.append((p, vals, key))
 
+        print(f"loaded games: {len(no_sol_pool)},{len(easy_pool)}, {len(med_pool)}, {len(hard_pool)}, total: {len(no_sol_pool) + len(easy_pool) +len(med_pool) + len(hard_pool)}")
         #print(f"after load, hard pool len={len(easy_pool)}; {len(med_pool)}; {len(hard_pool)}")
+        if level in ("challenge","4"):
+            print("Q picked from no_sol pool")
+            pool = [it for it in no_sol_pool if self._not_recent(it[2])]
+            return self._pick_from(pool)
+
         if level in ("easy","1"):
             print("Q picked from easy pool")
             pool = [it for it in (easy_pool + med_pool_with_simple) if self._not_recent(it[2])]
@@ -102,15 +108,16 @@ class QuestionPicker:
             need_ratio = self.no_sol_served / self.total_served if self.total_served else 0.0
             allow_no_sol = need_ratio < self.medium_no_sol_target
             med_only = [it for it in med_pool if has_solution(it[0])]
-            candidates = med_only + (no_sol_pool if allow_no_sol else [])
+            #candidates = med_only + (no_sol_pool if allow_no_sol else [])
+            candidates = med_only 
             candidates = [it for it in candidates if self._not_recent(it[2])]
             return self._pick_from(candidates)
 
         if level in ("hard","3"):
             print(f"hard pool len={len(hard_pool)}")
-            print("Q picked from hard pool")
-            #hard_like = hard_pool + [it for it in med_pool_with_hard if all_values_unique(it[1])]
-            hard_like = hard_pool 
+            hard_like = hard_pool + [it for it in med_pool_with_hard if all_values_unique(it[1])]
+            print(f"Q picked from hard_like pool {len(hard_like)}")
+            #hard_like = hard_pool 
             if not hard_like:
                 hard_like = med_pool_with_hard
             hard_like = [it for it in hard_like if self._not_recent(it[2])]
