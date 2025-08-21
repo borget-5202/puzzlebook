@@ -26,6 +26,17 @@
 
     .board{max-width:var(--board-max);margin:0 auto;width:100%}
 
+    /* Blinking animation for error messages */
+    @keyframes blink {
+        0% { opacity: 1; }
+        50% { opacity: 0.3; }
+        100% { opacity: 1; }
+    }
+
+    .status-error {
+        animation: blink 0.5s ease-in-out 3; /* Blink 3 times over 1.5 seconds */
+    }
+
     /* Cards grid */
     .cards{
       display:grid;
