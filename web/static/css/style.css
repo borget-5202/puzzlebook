@@ -26,6 +26,8 @@
 
     .board{max-width:var(--board-max);margin:0 auto;width:100%}
 
+    #skipBtn { display: none !important; }
+
     /* Blinking animation for error messages */
     @keyframes blink {
         0% { opacity: 1; }
