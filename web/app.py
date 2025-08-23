@@ -1,322 +1,529 @@
-#nennnn
-##nnn
-from flask import Flask, request, jsonify, make_response, send_from_directory
-import os, uuid, logging, sys
-import random
+# web/app.py
+from flask import Flask, request, jsonify, make_response, send_file
+import json, random, time, ast
 from pathlib import Path
-import json
-import hashlib
-import ast
-from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
-# Fix Python path to import from game24
-PROJECT_ROOT = Path(__file__).parent.parent
-sys.path.append(str(PROJECT_ROOT))
+import core  # our helpers/state module
 
-from game24.picker import QuestionPicker 
-from game24.card_utils import get_values, get_ranks_for_display, _rng_for
-from game24.card_assets import pick_card_images
-from game24.complexity import preprocess_ranks
-from game24.safety_eval import safe_eval_bounded, UnsafeExpression
+# ---- optional imports from your original logic ----
+try:
+    from game24.complexity import puzzle_has_simple_solution as _simple_fn  # type: ignore
+    from game24.complexity import puzzle_has_hard_solution   as _hard_fn    # type: ignore
+except Exception:
+    _simple_fn = None
+    _hard_fn = None
 
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
+app = Flask(__name__, static_folder='static', template_folder='templates')
 
-# Load puzzles
-DATA_ROOT = PROJECT_ROOT / 'web' / 'static' / 'answers.json'
-with open(DATA_ROOT, encoding="utf-8") as f:
-    PUZZLES = json.load(f)
-logger.debug(f"I loaded total {len(PUZZLES)} puzzles from {DATA_ROOT}")
+# ---------- load puzzles ----------
+def _answers_path():
+    here = Path(__file__).parent
+    p = here / 'static' / 'answers.json'
+    if p.exists(): return p
+    raise FileNotFoundError("answers.json not found at web/static/answers.json")
 
-# Configuration
-PICTURES_ROOT = PROJECT_ROOT / 'web' / 'static' / 'assets' / 'images'
-SESSION_STORE = {}
-logger.debug(f"picutures are here: {PICTURES_ROOT}")
+ANSWERS_PATH = _answers_path()
+with open(ANSWERS_PATH, encoding='utf-8') as f:
+    ALL_PUZZLES: List[Dict[str, Any]] = json.load(f)
 
-app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key')
-app.permanent_session_lifetime = timedelta(minutes=30)  # Session expires after 30 minutes
+def _values_key(cards: List[int]) -> str:
+    return "-".join(map(str, sorted(map(int, cards or []))))
 
-def cleanup_sessions():
-    """Remove expired sessions"""
-    now = datetime.now()
-    expired = [sid for sid, session in SESSION_STORE.items() 
-              if now - session['last_activity'] > app.permanent_session_lifetime]
-    for sid in expired:
-        del SESSION_STORE[sid]
+# Fast lookups
+core.PUZZLES_BY_ID  = {int(p['case_id']): p for p in ALL_PUZZLES}
+core.PUZZLES_BY_KEY = {_values_key(p['cards']): p for p in ALL_PUZZLES}
 
-def get_or_create_session_id(request):
-    """Gets the session ID from the cookie or creates a new one."""
-    session_id = request.cookies.get('session_id')
-    if not session_id:
-        session_id = str(uuid.uuid4())
-    return session_id
+app.logger.debug(f"I loaded total {len(ALL_PUZZLES)} puzzles from {ANSWERS_PATH}")
+assets_dir = Path(app.static_folder) / 'assets' / 'images'
+app.logger.debug(f"picutures are here: {assets_dir}")
 
-def get_session_state(session_id, expected_seq=None):
-    """Retrieves the session state, optionally validating the sequence number."""
-    cleanup_sessions()  # Clean up expired sessions first
+# ---------- helpers for preprocessing into pools ----------
+def has_solution(p: Dict[str,Any]) -> bool:
+    return bool(p.get('solutions'))
 
-    # Get or create the session state
-    if session_id not in SESSION_STORE:
-        # Initialize a brand new session
-        SESSION_STORE[session_id] = {
-            'seq': expected_seq if expected_seq is not None else 0,
-            'picker': QuestionPicker(PUZZLES),
-            'current': None,
-            'last_activity': datetime.now(),
-            'stats': {
-                'played': 0,
-                'solved': 0,
-                'revealed': 0,
-                'skipped': 0,
-                'difficulty': {
-                    'easy': {'played': 0, 'solved': 0},
-                    'medium': {'played': 0, 'solved': 0},
-                    'hard': {'played': 0, 'solved': 0},
-                    'challenge': {'played': 0, 'solved': 0}
-                }
-            }
-        }
-        app.logger.debug(f"Created NEW session: {session_id[:8]}...")
-    else:
-        # This is an existing session
-        session_data = SESSION_STORE[session_id]
+def puzzle_has_simple_solution(p: Dict[str,Any]) -> bool:
+    if _simple_fn:
+        try:
+            return bool(_simple_fn(p))
+        except Exception:
+            pass
+    for s in (p.get('solutions') or []):
+        if '^' not in s:
+            return True
+    return False
 
-        # CRITICAL: Check for sequence mismatch.
-        # If the frontend provides an expected_seq, it must match our stored seq.
-        if expected_seq is not None and session_data['seq'] != expected_seq:
-            app.logger.warning(f"Session {session_id[:8]}... seq mismatch! Frontend:{expected_seq}, Backend:{session_data['seq']}. Resetting session.")
-            # Handle the mismatch. One option is to reset the session to the frontend's expected_seq.
-            # This is often the safest bet to recover from a de-sync.
-            session_data['seq'] = expected_seq
-            # You might also want to reset other state, but it's complex.
-            # For simplicity, we just update the seq to what the frontend expects.
+def puzzle_has_hard_solution(p: Dict[str,Any]) -> bool:
+    if _hard_fn:
+        try:
+            return bool(_hard_fn(p))
+        except Exception:
+            pass
+    for s in (p.get('solutions') or []):
+        if '^' in s:
+            return True
+    return False
 
-        # Update the activity time
-        session_data['last_activity'] = datetime.now()
+def _build_index(puzzles: List[Dict[str,Any]]):
+    idx = []
+    for p in puzzles:
+        vals = list(map(int, p.get('cards') or []))
+        key = _values_key(vals)
+        idx.append((p, vals, key))
+    return idx
 
-    return SESSION_STORE[session_id]
+def pre_process_pool(puzzles: List[Dict[str,Any]]):
+    app.logger.debug("inside pre_process_pool, sort out pools")
 
-# Helper function to find a puzzle by case_id
-def find_puzzle_by_case_id(case_id):
-    """Search all puzzles for a specific case_id. Returns the puzzle dict or None."""
-    for puzzle in PUZZLES:
-        if puzzle.get('case_id') == case_id:
-            return puzzle
-    return None  # Not found
+    easy_pool = []
+    med_pool_with_simple = []
+    med_pool = []
+    hard_pool = []
+    med_pool_with_hard = []
+    nosol_pool = []
 
-@app.route('/api/next')
-def api_next():
-    # Get session ID and the expected sequence number from the frontend
-    session_id = get_or_create_session_id(request)
-    logger.debug(f"in next :session_id = {session_id}")
-    current_seq = request.args.get('seq', type=int, default=0)  # Default to 0 if not provided
+    for (p, vals, key) in _build_index(puzzles):
+        lvl = str(p.get("level","")).strip().lower()
+        _has = has_solution(p)
+        if not _has:
+            nosol_pool.append((p, vals, key))
+        if lvl == "easy" and _has:
+            easy_pool.append((p, vals, key))
+        if lvl == "medium":
+            med_pool.append((p, vals, key))
+            if _has and puzzle_has_simple_solution(p):
+                med_pool_with_simple.append((p, vals, key))
+            if _has and puzzle_has_hard_solution(p):
+                med_pool_with_hard.append((p, vals, key))
+        if lvl == "hard":
+            hard_pool.append((p, vals, key))
 
-    # Retrieve the session state, checking for seq mismatch
-    state = get_session_state(session_id, expected_seq=current_seq)
+    easy_like = easy_pool + med_pool_with_simple
+    hard_like = hard_pool + med_pool_with_hard
 
-    # Now, INCREMENT the sequence number for the NEW state we are about to send
-    new_seq = state['seq'] + 1
-    state['seq'] = new_seq  # Update the state with the new sequence number
+    app.logger.debug(
+        "loaded original games: nosol=%d, easy=%d, medium=%d, hard=%d, total=%d",
+        len(nosol_pool), len(easy_pool), len(med_pool), len(hard_pool),
+        len(nosol_pool) + len(easy_pool) + len(med_pool) + len(hard_pool)
+    )
 
-    # Update stats and pick a new question
-    theme = request.args.get('theme', 'classic')
-    level = request.args.get('level', 'easy')
-    requested_case_id = request.args.get('case_id', type=int)
-
-    state['stats']['played'] += 1
-    state['stats']['difficulty'][level]['played'] += 1 # This line now works
-
-    #new
-    if requested_case_id is not None:
-        # Try to find the specific puzzle by ID
-        p = find_puzzle_by_case_id(requested_case_id)
-        if p is None:
-            # If not found, decrement the counters we just added and return an error
-            state['seq'] -= 1
-            state['stats']['played'] -= 1
-            return jsonify({"error": f"Case ID {requested_case_id} not found."}), 404
-        print(f"DEBUG: Loading specific case_id: {requested_case_id}")
-    else:
-        # Otherwise, get a random puzzle the normal way
-        p = state['picker'].pick(level)
-        if not p:
-            # If no puzzles available, decrement the counters and return an error
-            state['seq'] -= 1
-            state['stats']['played'] -= 1
-            return jsonify({"error": "No puzzles available"}), 404
-
-    state['current'] = p
-
-    values = get_values(p)
-    ranks = get_ranks_for_display(p)
-    rng = _rng_for(values, salt=theme)
-    cards = pick_card_images(values, theme=theme, pictures_root=str(PICTURES_ROOT), rng=rng)
-
-    # Build the response
-    response_data = {
-        "seq": new_seq, # Send the NEW sequence number to the frontend
-        "ranks": ranks,
-        "values": values,
-        "images": [{"code": c["code"], "url": f"/static/assets/images/{theme}/{c['code']}.png"} for c in cards],
-        "question": f"[{', '.join(ranks)}] (values: {', '.join(str(v) for v in values)})",
-        "case_id": p.get('case_id'),
-        "difficulty": p.get("difficulty", "unknown"),
-        "stats": state['stats']
+    return {
+        'nosol': nosol_pool,
+        'easy_like': easy_like,
+        'medium': med_pool,
+        'hard_like': hard_like,
     }
 
-    # Create the response and set the session cookie if it's a new session
-    resp = make_response(jsonify(response_data))
+# Build once at startup
+POOLS_ADV = pre_process_pool(ALL_PUZZLES)
+
+# ---------- image helpers ----------
+SUITS = ['D','S','H','C']
+def _rank_code(n: int) -> str:
+    return {1:'A',10:'T',11:'J',12:'Q',13:'K'}.get(n, str(n))
+
+def _cards_to_images(cards: List[int], theme: str) -> List[Dict[str, str]]:
+    out = []
+    for i, n in enumerate(cards):
+        rank = _rank_code(n)
+        suit = SUITS[i % len(SUITS)]
+        code = f"{rank}{suit}"
+        url = f"/static/assets/images/{theme}/{code}.png"
+        out.append({'code': code, 'url': url})
+    return out
+
+# ----- safe expression eval for /api/check -----
+ALLOWED_NODES = (
+    ast.Expression, ast.BinOp, ast.UnaryOp, ast.Num, ast.Constant,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.USub, ast.UAdd,
+    ast.Load, ast.Name
+)
+ALLOWED_NAMES = { 'A':1, 'T':10, 'J':11, 'Q':12, 'K':13 }
+def safe_eval(expr: str) -> float:
+    tree = ast.parse(expr, mode='eval')
+    for node in ast.walk(tree):
+        if not isinstance(node, ALLOWED_NODES):
+            raise ValueError(f"Illegal expression: {type(node).__name__}")
+        if isinstance(node, ast.Name) and node.id not in ALLOWED_NAMES:
+            raise ValueError(f"Unknown identifier: {node.id}")
+    code = compile(tree, "<expr>", "eval")
+    return float(eval(code, {"__builtins__": {}}, ALLOWED_NAMES))
+
+# ---------- level normalization ----------
+LEVEL_ALIASES = {
+    '0':'easy','easy':'easy',
+    '1':'medium','medium':'medium',
+    '2':'hard','3':'hard','hard':'hard',
+    '4':'challenge','challenge':'challenge',
+    'nosol':'nosol',
+}
+def normalize_level(level: str) -> str:
+    if level is None: return 'easy'
+    return LEVEL_ALIASES.get(str(level).lower(), str(level).lower())
+
+# ---------- selection using preprocessed pools ----------
+def _pick_from_pool_name(pool_name: str, state: Dict[str,Any]) -> Dict[str,Any]:
+    pool = POOLS_ADV.get(pool_name, [])
+    if not pool:
+        pool = POOLS_ADV['medium']
+
+    recent = set(state.get('recent_keys', [])[-50:])
+    candidates = [t for t in pool if t[2] not in recent] or pool
+    choice = random.choice(candidates)
+    state.setdefault('recent_keys', []).append(choice[2])
+    if len(state['recent_keys']) > 100:
+        state['recent_keys'] = state['recent_keys'][-100:]
+    return choice[0]  # puzzle dict
+
+def _random_pick_by_level(level: str, state: Dict[str,Any]) -> Dict[str,Any]:
+    lvl = normalize_level(level)
+    if lvl in ('challenge','nosol'):
+        return _pick_from_pool_name('nosol', state)
+    if lvl == 'hard':
+        return _pick_from_pool_name('hard_like', state)
+    if lvl == 'easy':
+        return _pick_from_pool_name('easy_like', state)
+    return _pick_from_pool_name('medium', state)
+
+def _counting_level_for_current(state: Dict[str,Any], puzzle: Dict[str,Any], requested_level: str) -> str:
+    p = core._pool(state)
+    if p.get('mode') in ('custom', 'competition') or state.get('current_case_id'):
+        return puzzle.get('level') or normalize_level(requested_level)
+    rl = normalize_level(requested_level)
+    return 'challenge' if rl in ('challenge','nosol') else rl
+
+def _competition_time_left(state: Dict[str,Any]) -> Optional[int]:
+    end = state.get('competition_ends_at')
+    if not end: return None
+    left = int(round(end - time.time()))
+    return max(0, left)
+
+def _stats_payload(state):
+    st = state.get('stats', {})
+    app.logger.debug(f"""
+        'played': {int(st.get('played', 0))},
+        'solved': {int(st.get('solved', 0))},
+        'revealed': {int(st.get('revealed', 0))},
+        'skipped': {int(st.get('skipped', 0))},
+        'difficulty': {st.get('by_level', '')},
+        'help_single': {int(st.get('help_single', 0))},
+        'help_all': {int(st.get('help_all', 0))},
+        'answer_attempts': {int(st.get('answer_attempts', 0))},
+        'answer_correct': {int(st.get('answer_correct', 0))},
+        'answer_wrong': {int(st.get('answer_wrong', 0))},
+        'deal_swaps': {int(st.get('deal_swaps', 0))},
+        """)
+    return {
+        'played': int(st.get('played', 0)),
+        'solved': int(st.get('solved', 0)),
+        'revealed': int(st.get('revealed', 0)),
+        'skipped': int(st.get('skipped', 0)),
+        'difficulty': st.get('by_level', {}),
+        # optional action counters if you want them on every response
+        'help_single': int(st.get('help_single', 0)),
+        'help_all': int(st.get('help_all', 0)),
+        'answer_attempts': int(st.get('answer_attempts', 0)),
+        'answer_correct': int(st.get('answer_correct', 0)),
+        'answer_wrong': int(st.get('answer_wrong', 0)),
+        'deal_swaps': int(st.get('deal_swaps', 0)),
+    }
+
+
+# ---------- routes ----------
+@app.get('/')
+def index():
+    return send_file('static/index.html')
+
+@app.get('/api/next')
+def api_next():
+    sid = core.get_or_create_session_id(request)
+    app.logger.debug(f"in next :session_id = {sid}")
+    state = core.SESSIONS.setdefault(sid, core.default_state())
+    gid = core.get_guest_id(request)
+    if gid: state['guest_id'] = gid
+
+    theme = request.args.get('theme', 'classic')
+    level = request.args.get('level', 'easy')
+    case_id = request.args.get('case_id', type=int)
+    seq = int(request.args.get('seq', 0))
+
+    # If the user is dealing away the current hand without interacting, count a deal_swap
+    prev_cid = state.get('current_case_id')
+    if prev_cid and not state.get('hand_interacted'):
+        core.bump_deal_swap(state)  # NO played increment; purely diagnostic
+
+    left = _competition_time_left(state)
+    if left is not None and left <= 0:
+        return jsonify({'competition_over': True}), 403
+
+    pstate = core._pool(state)
+    puzzle = None
+
+    if case_id:
+        puzzle = core.PUZZLES_BY_ID.get(int(case_id))
+        if not puzzle:
+            return jsonify({'error': f'Case #{case_id} not found'}), 404
+        core._mark_case_status(state, case_id, 'shown')
+
+    elif pstate['mode'] in ('custom','competition'):
+        if pstate['done'] or pstate['index'] >= len(pstate['ids']):
+            pstate['done'] = True
+            score_map, unfinished = core._pool_score(state)
+            return jsonify({'error': 'Pool complete', 'pool_done': True, 'unfinished': unfinished}), 400
+        case_id = pstate['ids'][pstate['index']]
+        pstate['index'] += 1
+        puzzle = core.PUZZLES_BY_ID.get(int(case_id))
+        core._mark_case_status(state, case_id, 'shown')
+
+    else:
+        puzzle = _random_pick_by_level(level, state)
+
+    state['current_case_id'] = int(puzzle['case_id'])
+    state['hand_interacted'] = False
+    count_level = _counting_level_for_current(state, puzzle, level)
+    state['current_effective_level'] = count_level
+
+    values = list(map(int, puzzle['cards']))
+    images = _cards_to_images(values, theme)
+    resp_payload = {
+        'seq': seq + 1,
+        'case_id': int(puzzle['case_id']),
+        'question': ", ".join(map(str, values)),
+        'values': values,
+        'images': images,
+        'help_disabled': bool(state.get('help_disabled')),
+        'pool_done': bool(pstate['done'] or (pstate['mode'] in ('custom','competition') and pstate['index'] >= len(pstate['ids']))),
+    }
+
+    left = _competition_time_left(state)
+    if left is not None and left > 0:
+        resp_payload['time_left'] = left
+
+    resp = make_response(jsonify(resp_payload))
+    cookie_base = (sid.split(':', 1)[0]) if ':' in sid else sid
     if not request.cookies.get('session_id'):
-        resp.set_cookie('session_id', session_id, max_age=1800) # 30 minutes
+        resp.set_cookie('session_id', cookie_base, max_age=1800)
     return resp
 
-
-def _find_puzzle_by_values(values_needed: List[int]) -> Optional[Dict[str, Any]]:
-    tgt = sorted(int(x) for x in values_needed)
-    for p in PUZZLES:
-        if sorted(get_values(p)) == tgt:
-            return p
-    return None
-
-def extract_constants(expr: str) -> List[int]:
-    expr2 = preprocess_ranks(expr).replace("^", "**")
-    tree = ast.parse(expr2, mode="eval")
-    consts: List[int] = []
-    class V(ast.NodeVisitor):
-        def visit_Constant(self, node: ast.Constant):
-            if isinstance(node.value, (int, float)):
-                v = int(round(float(node.value)))
-                consts.append(v)
-    V().visit(tree)
-    return consts
-
-@app.route('/')
-def home():
-    return send_from_directory('static', 'index.html')
-
-@app.route('/api/check', methods=['POST'])
+# web/app.py - Fix the check endpoint
+@app.post('/api/check')
 def api_check():
-    session_id = get_or_create_session_id(request)
-    state = get_session_state(session_id)
-    
-    logger.debug(f"in check :session_id = {session_id}")
-    data = request.get_json()
-    values_needed = sorted(int(x) for x in data.get('values', []))
-    ans = (data.get('answer', '') or "").strip()
+    sid = core.get_or_create_session_id(request)
+    state = core.SESSIONS.setdefault(sid, core.default_state())
+    gid = core.get_guest_id(request)
+    if gid: state['guest_id'] = gid
 
-    if ans.lower() in {"no sol", "nosol", "no solution", "0", "-1"}:
-        puzzle = _find_puzzle_by_values(values_needed)
-        sols_exist = bool(puzzle and puzzle.get("solutions"))
+    data = request.get_json(silent=True) or {}
+    values = data.get('values') or []
+    ans = (data.get('answer') or '').strip()
+
+    cid = state.get('current_case_id')
+    puzzle = core.PUZZLES_BY_ID.get(int(cid)) if cid else core.PUZZLES_BY_KEY.get(_values_key(values)) if values else None
+
+    # "no solution" path counts as an attempt
+    if ans.lower() in {"no solution","no sol","nosol","0","-1"}:
+        sols_exist = bool(puzzle and puzzle.get('solutions'))
+        core.bump_played_once(state, state.get('current_effective_level') or (puzzle and puzzle.get('level') or 'unknown'))
+        state['hand_interacted'] = True
         if not sols_exist:
-            return jsonify({"ok": True, "value": None, "kind": "no-solution"})
+            core.bump_attempt(state, True)
+            if cid:
+                core._mark_case_status(state, cid, 'good')
+                core._set_case_solved(state, cid)
+            core.bump_solved(state, state.get('current_effective_level') or (puzzle and puzzle.get('level') or 'unknown'))
+            return jsonify({'ok': True, 'value': None, 'kind': 'no-solution', 'stats': _stats_payload(state)})
         else:
+            core.bump_attempt(state, False)
+            in_comp = (core._pool(state).get('mode') == 'competition')
+            if cid: core._mark_case_status(state, cid, 'attempt')
             return jsonify({
-                "ok": False,
-                "reason": "Try 'help' to see a solution example, 'help all' to see all solutions.",
-                "kind": "help-available",
+                'ok': False,
+                'reason': "Incorrect — this case is solvable." + (" (Help is disabled in competition.)" if in_comp else " Try Help to see one."),
+                'kind': 'solvable' if in_comp else 'help-available',
+                'stats': _stats_payload(state)
             })
 
     try:
-        used_consts = sorted(extract_constants(ans))
-    except Exception as e:
-        return jsonify({"ok": False, "reason": f"Invalid expression: {e}"}), 400
+        value = safe_eval(ans)
+    except Exception:
+        core.bump_played_once(state, state.get('current_effective_level') or (puzzle and puzzle.get('level') or 'unknown'))
+        core.bump_attempt(state, False)
+        state['hand_interacted'] = True
+        if cid: core._mark_case_status(state, cid, 'attempt')
+        return jsonify({'ok': False, 'reason': 'Invalid expression', 'stats': _stats_payload(state)}), 200
 
-    if used_consts != values_needed:
-        return jsonify({"ok": False, "reason": f"You must use exactly these numbers {values_needed}. Found {used_consts}."}), 400
+    tol = 1e-6
+    ok = abs(value - 24.0) < tol
 
-    try:
-        val = safe_eval_bounded(preprocess_ranks(ans))
-    except UnsafeExpression as e:
-        return jsonify({"ok": False, "reason": str(e)}), 400
-    except ZeroDivisionError:
-        return jsonify({"ok": False, "reason": "Division by zero."}), 400
-    except Exception as e:
-        return jsonify({"ok": False, "reason": f"Invalid expression: {e}"}), 400
+    level_for_stats = state.get('current_effective_level') or (puzzle and puzzle.get('level') or 'unknown')
+    core.bump_played_once(state, level_for_stats)
+    core.bump_attempt(state, ok)
+    state['hand_interacted'] = True
 
-    if abs(val - 24.0) < 1e-9:
-        state['stats']['solved'] += 1
-        state['stats']['difficulty'][state['current'].get('level', 'easy')]['solved'] += 1
-        return jsonify({"ok": True, "value": val, "kind": "formula"})
+    if ok:
+        if cid:
+            core._mark_case_status(state, cid, 'good')
+            core._set_case_solved(state, cid)
+        core.bump_solved(state, level_for_stats)
+        return jsonify({'ok': True, 'value': value, 'stats': _stats_payload(state)})
     else:
-        return jsonify({"ok": False, "value": val, "reason": f"Not 24 "})
+        if cid: core._mark_case_status(state, cid, 'attempt')
+        return jsonify({'ok': False, 'value': value, 'reason': 'Not 24', 'stats': _stats_payload(state)})
 
-@app.route('/api/help', methods=['POST'])
+@app.post('/api/help')
 def api_help():
-    session_id = get_or_create_session_id(request)
-    logger.debug(f"in help :session_id = {session_id}")
-    state = get_session_state(session_id)
-    state['stats']['revealed'] += 1
-    
-    data = request.get_json()
-    try:
-        p = _find_puzzle_by_values(data.get('values', []))
-        if not p:
-            return jsonify({"solutions": [], "has_solution": False})
+    sid = core.get_or_create_session_id(request)
+    app.logger.debug(f"in check :session_id = {sid}")
+    state = core.SESSIONS.setdefault(sid, core.default_state())
+    gid = core.get_guest_id(request)
+    if gid: state['guest_id'] = gid
 
-        sols = list(p.get("solutions", []))
-        if not sols:
-            return jsonify({"solutions": [], "has_solution": False})
+    if state.get('help_disabled'):
+        return jsonify({'has_solution': False, 'solutions': []}), 200
 
-        if data.get('all', False):
-            return jsonify({"solutions": sols, "has_solution": True})
-        return jsonify({"solutions": [random.choice(sols)], "has_solution": True})
-    except Exception as e:
-        return jsonify({"solutions": [], "has_solution": False}), 400
+    data = request.get_json(silent=True) or {}
+    values = data.get('values') or []
+    show_all = bool(data.get('all'))
+    cid = state.get('current_case_id')
+    puzzle = core.PUZZLES_BY_ID.get(int(cid)) if cid else core.PUZZLES_BY_KEY.get(_values_key(values)) if values else None
 
-@app.route('/api/skip', methods=['POST'])
-def api_skip():
-    session_id = get_or_create_session_id(request)
-    logger.debug(f"in skip :session_id = {session_id}")
-    state = get_session_state(session_id)
-    state['stats']['skipped'] += 1
-    return api_next()
+    sols = list(puzzle.get('solutions') or []) if puzzle else []
+    has = len(sols) > 0
+    resp = {'has_solution': has, 'solutions': sols if show_all else (sols[:min(50, len(sols))] if has else [])}
 
-@app.route('/api/restart', methods=['POST'])
+    level_for_stats = state.get('current_effective_level') or (puzzle and puzzle.get('level') or 'unknown')
+    core.bump_played_once(state, level_for_stats)
+    core.bump_revealed(state)
+    core.bump_help(state, all=show_all)  # NEW: track help usage
+    state['hand_interacted'] = True
+
+    if cid and has:
+        core._mark_case_status(state, cid, 'revealed')
+    resp['stats'] = _stats_payload(state)
+    return jsonify(resp)
+
+@app.post('/api/pool')
+def api_pool():
+    sid = core.get_or_create_session_id(request)
+    app.logger.debug(f"in check :session_id = {sid}")
+    state = core.SESSIONS.setdefault(sid, core.default_state())
+    gid = core.get_guest_id(request)
+    if gid: state['guest_id'] = gid
+
+    data = request.get_json(silent=True) or {}
+    mode = data.get('mode')
+    ids = data.get('case_ids') or []
+    duration = int(data.get('duration_sec') or 0)
+
+    if mode not in ('custom','competition'):
+        return jsonify({'error': 'mode must be custom or competition'}), 400
+    if not ids:
+        return jsonify({'error': f'No {mode} pool set'}), 400
+
+    p = core._pool(state)
+    p['mode'] = mode
+    p['ids'] = [int(x) for x in ids]
+    p['index'] = 0
+    p['status'] = {str(cid): {'status':'unseen','attempts':0} for cid in p['ids']}
+    p['score']  = {str(cid): 0 for cid in p['ids']}
+    p['done'] = False
+
+    if mode == 'competition' and duration > 0:
+        state['competition_ends_at'] = time.time() + duration
+        state['help_disabled'] = True
+    else:
+        state.pop('competition_ends_at', None)
+        state['help_disabled'] = False
+
+    # Optional: reset session-visible stats when a new pool starts
+    state['stats'].update({
+        'played': 0, 'solved': 0, 'revealed': 0, 'skipped': 0,
+        'by_level': {},
+        'help_single': 0, 'help_all': 0,
+        'answer_attempts': 0, 'answer_correct': 0, 'answer_wrong': 0,
+        'deal_swaps': 0,
+    })
+    state['recent_keys'] = []
+    state['current_case_id'] = None
+    state['current_effective_level'] = None
+    state['hand_interacted'] = False
+
+    return jsonify({'ok': True, 'pool_len': len(p['ids']), 'stats_reset': True})
+
+@app.get('/api/pool_report')
+def api_pool_report():
+    sid = core.get_or_create_session_id(request)
+    app.logger.debug(f"in check :session_id = {sid}")
+    state = core.SESSIONS.setdefault(sid, core.default_state())
+    gid = core.get_guest_id(request) or state.get('guest_id')
+
+    st = state.get('stats', {})
+    score_map, unfinished = core._pool_score(state)
+    payload = {
+        # classic
+        'played': int(st.get('played', 0)),
+        'solved': int(st.get('solved', 0)),
+        'revealed': int(st.get('revealed', 0)),
+        'skipped': int(st.get('skipped', 0)),
+        'difficulty': st.get('by_level', {}),
+        # new action counters
+        'help_single': int(st.get('help_single',0)),
+        'help_all': int(st.get('help_all',0)),
+        'answer_attempts': int(st.get('answer_attempts',0)),
+        'answer_correct': int(st.get('answer_correct',0)),
+        'answer_wrong': int(st.get('answer_wrong',0)),
+        'deal_swaps': int(st.get('deal_swaps',0)),
+
+        'guest_id': gid,
+        'pool_mode': core._pool(state).get('mode'),
+        'pool_len': len(core._pool(state).get('ids') or []),
+        'pool_score': score_map,
+        'unfinished': unfinished,
+        'pool_report': core._pool_report(state),
+    }
+    return jsonify({'ok': True, 'stats': payload})
+
+@app.post('/api/restart')
 def api_restart():
-    session_id = get_or_create_session_id(request)
-    logger.debug(f"in restart :session_id = {session_id}")
-    if session_id in SESSION_STORE:
-        level = SESSION_STORE[session_id]['current'].get('level', 'easy') if SESSION_STORE[session_id]['current'] else 'easy'
-        SESSION_STORE[session_id] = {
-            'seq': 0,
-            'picker': QuestionPicker(PUZZLES, recent_window=60, medium_no_sol_target=0.10),
-            'current': None,
-            'last_activity': datetime.now(),
-            'stats': {
-                'played': 0,
-                'solved': 0,
-                'revealed': 0,
-                'skipped': 0,
-                'difficulty': {
-                    'easy': {'played': 0, 'solved': 0},
-                    'medium': {'played': 0, 'solved': 0},
-                    'hard': {'played': 0, 'solved': 0},
-                    'challenge': {'played': 0, 'solved': 0}
-                }
-            }
-        }
-    return jsonify({"ok": True, "msg": "Session reset"})
+    sid = core.get_or_create_session_id(request)
+    app.logger.debug(f"in restart :session_id = {sid}")  # <— add this line
+    core.SESSIONS[sid] = core.default_state()
+    return jsonify({'ok': True})
 
-@app.route('/api/exit', methods=['POST'])
+@app.post('/api/exit')
 def api_exit():
-    session_id = get_or_create_session_id(request)
-    logger.debug(f"in exit :session_id = {session_id}")
-    if session_id in SESSION_STORE:
-        del SESSION_STORE[session_id]
-    return jsonify({"ok": True, "msg": "Session ended"})
+    sid = core.get_or_create_session_id(request)
+    app.logger.debug(f"in check :session_id = {sid}")
+    state = core.SESSIONS.setdefault(sid, core.default_state())
+    gid = core.get_guest_id(request) or state.get('guest_id')
 
-@app.route('/api/stats')
-def api_stats():
-    session_id = get_or_create_session_id(request)
-    state = get_session_state(session_id)
-    return jsonify(state['stats'])
+    st = state.get('stats', {})
+    score_map, unfinished = core._pool_score(state)
+    p = core._pool(state)
+    payload = {
+        'played': int(st.get('played', 0)),
+        'solved': int(st.get('solved', 0)),
+        'revealed': int(st.get('revealed', 0)),
+        'skipped': int(st.get('skipped', 0)),
+        'difficulty': st.get('by_level', {}),
 
-@app.route('/static/<path:filename>')
-def static_files(filename):
-    return send_from_directory('static', filename)
+        # NEW: action counters
+        'help_single': int(st.get('help_single',0)),
+        'help_all': int(st.get('help_all',0)),
+        'answer_attempts': int(st.get('answer_attempts',0)),
+        'answer_correct': int(st.get('answer_correct',0)),
+        'answer_wrong': int(st.get('answer_wrong',0)),
+        'deal_swaps': int(st.get('deal_swaps',0)),
+
+        'guest_id': gid,
+        'pool_mode': p.get('mode'),
+        'pool_len': len(p.get('ids') or []),
+        'pool_score': score_map,
+        'unfinished': unfinished,
+        'pool_report': core._pool_report(state),
+    }
+    return jsonify({'ok': True, 'stats': payload})
 
 if __name__ == '__main__':
-    print("using version stats error")
     app.run(debug=True)
+
