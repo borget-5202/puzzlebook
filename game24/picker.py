@@ -96,12 +96,14 @@ class QuestionPicker:
         if level in ("challenge","4"):
             print("Q picked from no_sol pool")
             pool = [it for it in no_sol_pool if self._not_recent(it[2])]
-            return self._pick_from(pool)
+            chosen = self._pick_from(pool)
+            return {**chosen, "level": "challenge", "difficulty": "challenge"}
 
         if level in ("easy","1"):
             print("Q picked from easy pool")
             pool = [it for it in (easy_pool + med_pool_with_simple) if self._not_recent(it[2])]
-            return self._pick_from(pool)
+            chosen = self._pick_from(pool)
+            return {**chosen, "level": "easy", "difficulty": "easy"}
 
         if level in ("medium","2"):
             print("Q picked from medium pool")
@@ -121,8 +123,47 @@ class QuestionPicker:
             if not hard_like:
                 hard_like = med_pool_with_hard
             hard_like = [it for it in hard_like if self._not_recent(it[2])]
-            return self._pick_from(hard_like)
+            chosen = self._pick_from(hard_like)
+            return {**chosen, "level": "hard", "difficulty": "hard"}
 
         print("Q picked None")
         return None
 
+    def pre_process_pool(PUZZLE):
+        """sort out pools by level """
+
+        print(f"inside pre_process_pool, sort out pools")
+
+        easy_pool = []
+        med_pool_with_simple = []
+        med_pool = []
+        hard_pool = []
+        med_pool_with_hard = []
+        no_sol_pool = []
+
+        for (p, vals, key) in self.index:
+            lvl = str(p.get("level","")).strip()
+            lvl = str(p.get("level","")).strip().lower()  # Normalize level case
+            has_sol = has_solution(p)
+            unique_vals = all_values_unique(vals)
+
+            if not has_sol:
+                no_sol_pool.append((p, vals, key))
+            if lvl == "easy" and has_sol:
+                easy_pool.append((p, vals, key))
+            if lvl == "medium":
+                med_pool.append((p, vals, key))
+                if has_sol and puzzle_has_simple_solution(p):
+                    med_pool_with_simple.append((p, vals, key))
+                if has_sol and puzzle_has_hard_solution(p):
+                    med_pool_with_hard.append((p, vals, key))
+            if lvl == "hard":
+                #if unique_vals:
+                hard_pool.append((p, vals, key))
+
+        #finalize pools
+
+        print(f"loaded original games: {len(no_sol_pool)},{len(easy_pool)}, {len(med_pool)}, {len(hard_pool)}, total: {len(no_sol_pool) + len(easy_pool) +len(med_pool) + len(hard_pool)}")
+        easy_pool = easy_pool + med_pool_with_simple
+        hard_pool = hard_pool + med_pool_with_hard
+        return [no_sol_pool, easy_pool + med_pool_with_simple, med_pool, hard_pool + med_pool_with_hard]
